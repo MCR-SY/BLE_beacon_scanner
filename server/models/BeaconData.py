@@ -5,6 +5,6 @@ from pydantic import Field
 
 class BeaconData(BaseModel):
     beacon_id: str # mac address
-    rssi: str
+    rssi: str | int | None = None
     timestamp: datetime = Field(default_factory=datetime.now)
 
