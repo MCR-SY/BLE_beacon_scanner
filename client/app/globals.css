@@ -24,3 +24,11 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* #region agent log */
+/* Fix Next.js portal positioning issue - ensure fixed positioning from start */
+nextjs-portal {
+  position: fixed !important;
+  z-index: 9999 !important;
+}
+/* #endregion agent log */
