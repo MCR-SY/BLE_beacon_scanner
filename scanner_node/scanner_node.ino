@@ -3,7 +3,6 @@
 #include <BLEUtils.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
-#include <time.h>
 #include <ArduinoJson.h>
 #include <vector>
 #include "painlessMesh.h"
@@ -22,6 +21,17 @@ uint32_t ROOT_NODE_ID = 2445762485;  //ESP8266 root device id
 
 Scheduler userScheduler;  // to control personal tasks
 painlessMesh mesh;
+
+//prototypes
+void sendQueuedDevices();
+
+Task scanTask(TASK_SECOND * 10, TASK_FOREVER, []() {
+  Serial.println("Scanning...");
+  BLEScanResults* foundDevices = pBLEScan->start(scanTime, false);
+  Serial.printf("Scan complete. %d devices found.\n\n", foundDevices->getCount());
+  pBLEScan->clearResults();
+  sendQueuedDevices();
+});
 
 // ------------------------- DEVICE QUEUE ------------------------------
 struct BeaconData {
@@ -51,16 +61,6 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
     else
       data.name = "unknown";
 
-    // Timestamp
-    // struct tm timeinfo;
-    // if (getLocalTime(&timeinfo)) {
-    //   char buf[20];
-    //   sprintf(buf, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
-    //   data.timestamp = String(buf);
-    // } else {
-    //   data.timestamp = "time_error";
-    // }
-
     // Store into queue
     deviceQueue.push_back(data);
 
@@ -68,7 +68,6 @@ class MyAdvertisedDeviceCallbacks : public BLEAdvertisedDeviceCallbacks {
     Serial.println("Added to queue:");
     Serial.println(" MAC: " + data.mac);
     Serial.println(" RSSI: " + String(data.rssi));
-    // Serial.println(" Time: " + data.timestamp);
     Serial.println("----------------------");
   }
 };
@@ -91,13 +90,12 @@ void setup() {
   BLEDevice::init("");
   pBLEScan = BLEDevice::getScan();
   pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-  pBLEScan->setActiveScan(true);
+  pBLEScan->setActiveScan(false);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
 
   // Mesh Setup
-  //mesh.setDebugMsgTypes( ERROR | MESH_STATUS | CONNECTION | SYNC | COMMUNICATION | GENERAL | MSG_TYPES | REMOTE ); // all types on
-  mesh.setDebugMsgTypes(ERROR | STARTUP);  // set before init() so that you can see startup messages
+  mesh.setDebugMsgTypes(ERROR | STARTUP | MESH_STATUS);  // set before init() so that you can see startup messages
 
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
   mesh.onReceive(&receivedCallback);
@@ -106,25 +104,13 @@ void setup() {
   mesh.onNodeTimeAdjusted(&nodeTimeAdjustedCallback);
 
   // Timer based background tasks, so they don't break mesh
-  // userScheduler.addTask(taskSendMessage);
-  // taskSendMessage.enable();
+  userScheduler.addTask(scanTask);
+  scanTask.enable();
 }
 
 void loop() {
-    // it will run the user scheduler as well
+  // it will run the user scheduler as well
   mesh.update();
-
-  // Scan...
-  Serial.println("Scanning...");
-  BLEScanResults* foundDevices = pBLEScan->start(scanTime, false);
-  Serial.printf("Scan complete. %d devices found.\n\n", foundDevices->getCount());
-
-  pBLEScan->clearResults();
-  // Send all queued devices AFTER scan
-  sendQueuedDevices();
-
-  Serial.println("\nWaiting 2 seconds before next scan...\n");
-  delay(2000);
 }
 
 // ------------------------- SEND TO ROOT NODE ----------------------------
@@ -140,20 +126,23 @@ void sendQueuedDevices() {
     BeaconData d = deviceQueue.front();
 
     StaticJsonDocument<200> doc;
+    doc["scanner_id"] = mesh.getNodeId();
     doc["beacon_id"] = d.mac;
     doc["rssi"] = d.rssi;
     //    doc["name"] = d.name;
-    //    doc["time"] = d.timestamp;
 
     String json;
     serializeJson(doc, json);
 
+    // mesh.sendBroadcast(json); // broadcast
     bool ok = mesh.sendSingle(ROOT_NODE_ID, json);  // unicast with multi-hop
+
+    if (!ok) {
+      Serial.println("Send failed");
+    }
 
     // Remove from queue
     deviceQueue.erase(deviceQueue.begin());
-
-    delay(200);
   }
 
   Serial.println("All queued devices sent.");
