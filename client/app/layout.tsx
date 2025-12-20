@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "BLE Beacon Dashboard",
-  description: "Real-time monitoring and analytics of Bluetooth Low Energy beacons",
+  title: "IFSEC India 2025 - Event Analytics Dashboard",
+  description: "Stall & Exhibitor Analysis, Product & Zone Analysis, and Event Overview for IFSEC India 2025",
 };
 
 export default function RootLayout({
