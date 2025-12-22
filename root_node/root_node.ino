@@ -1,69 +1,149 @@
 #include <Arduino.h>
-#if defined(ESP32)
-  #include <WiFi.h>
-  #include <HTTPClient.h>
-#elif defined(ESP8266)
-  #include <ESP8266WiFi.h>
-  #include <ESP8266HTTPClient.h>
-#endif
-#include <time.h>
-#include <ArduinoJson.h>
 #include <vector>
+#include <ArduinoJson.h>
 #include "painlessMesh.h"
 
+// ------------------------- SIM CONFIG -------------------------------
+#define TINY_GSM_MODEM_SIM800
+#define TINY_GSM_RX_BUFFER 1024
+
+#include <TinyGsmClient.h>
+#include <Wire.h>
+
+// APN
+const char apn[] = "airtelgprs.com";
+const char gprsUser[] = "";
+const char gprsPass[] = "";
+const char simPIN[] = "";
+
+// Server
+const char server[] = "postman-echo.com";
+const char resource[] = "/post";
+const int port = 80;
+
+// ------------------------- TTGO T-CALL PINS --------------------------
+#define MODEM_RST 5
+#define MODEM_PWKEY 4
+#define MODEM_POWER_ON 23
+#define MODEM_TX 27
+#define MODEM_RX 26
+#define I2C_SDA 21
+#define I2C_SCL 22
+
+#define SerialMon Serial
+#define SerialAT Serial1
+
+TwoWire I2CPower = TwoWire(0);
+TinyGsm modem(SerialAT);
+TinyGsmClient client(modem);
+
+// ------------------------- IP5306 -----------------------------------
+#define IP5306_ADDR 0x75
+#define IP5306_REG_SYS_CTL0 0x00
+
+bool setPowerBoostKeepOn(int en) {
+  I2CPower.beginTransmission(IP5306_ADDR);
+  I2CPower.write(IP5306_REG_SYS_CTL0);
+  I2CPower.write(en ? 0x37 : 0x35);
+  return I2CPower.endTransmission() == 0;
+}
+
+// ------------------------- MESH CONFIG -------------------------------
 #define MESH_PREFIX "EspMeshNetwork"
 #define MESH_PASSWORD "somethingSneaky"
 #define MESH_PORT 5555
 
-Scheduler userScheduler; // to control your personal task
-painlessMesh  mesh;
+Scheduler userScheduler;
+painlessMesh mesh;
 
-// ------------------------- WIFI CONFIG -------------------------------
-// const char* ssid = "Airtel_vsvai";
-// const char* password = "lenovoturbo";
-const char* ssid = "DESKTOP-002BNFK 2693";
-const char* password = "123456789";
+// ------------------------- DATA QUEUE --------------------------------
+std::vector<String> pendingQueue;
 
-// FastAPI URL
-const char* serverName = "http://192.168.1.12:8000/api/record-data";
+// ------------------------- MESH CALLBACKS ----------------------------
+void receivedCallback(uint32_t from, String &msg) {
+  Serial.printf("Received from %u: %s\n", from, msg.c_str());
+  pendingQueue.push_back(msg);
+}
 
-//const char* serverName = "http://glpjr3lm-5173.inc1.devtunnels.ms/api/record-data";
+void newConnectionCallback(uint32_t nodeId) {
+  Serial.printf("New node: %u\n", nodeId);
+}
 
+void changedConnectionCallback() {
+  Serial.println("Mesh connections changed");
+}
 
-// ------------------------- DEVICE QUEUE ------------------------------
-struct BeaconData {
-  String mac;
-  int rssi;
-  String name;
-  String timestamp;
-};
+void nodeTimeAdjustedCallback(int32_t offset) {
+  Serial.printf("Time adjusted. Offset=%d\n", offset);
+}
+
+// ------------------------- HTTP POST ---------------------------------
+void postToServer(const String &payload) {
+
+  if (!modem.isGprsConnected()) {
+    SerialMon.println("GPRS not connected");
+    return;
+  }
+
+  if (!client.connect(server, port)) {
+    SerialMon.println("TCP connect failed");
+    return;
+  }
+
+  client.print(String("POST ") + resource + " HTTP/1.1\r\n");
+  client.print(String("Host: ") + server + "\r\n");
+  client.println("Connection: close");
+  client.println("Content-Type: application/json");
+  client.print("Content-Length: ");
+  client.println(payload.length());
+  client.println();
+  client.println(payload);
+
+  unsigned long timeout = millis();
+  while (client.connected() && millis() - timeout < 10000) {
+    while (client.available()) {
+      SerialMon.write(client.read());
+      timeout = millis();
+    }
+  }
+
+  client.stop();
+  SerialMon.println("\nPOST done");
+}
 
 // --------------------------- SETUP -----------------------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println();
+  delay(3000);
 
-  // Connect WiFi
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  I2CPower.begin(I2C_SDA, I2C_SCL, 400000);
+  setPowerBoostKeepOn(1);
+
+  pinMode(MODEM_PWKEY, OUTPUT);
+  pinMode(MODEM_RST, OUTPUT);
+  pinMode(MODEM_POWER_ON, OUTPUT);
+  digitalWrite(MODEM_POWER_ON, HIGH);
+  digitalWrite(MODEM_RST, HIGH);
+  digitalWrite(MODEM_PWKEY, LOW);
+
+  SerialAT.begin(115200, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  delay(3000);
+
+  SerialMon.println("Restarting modem...");
+  modem.restart();
+
+  if (strlen(simPIN) && modem.getSimStatus() != 3) {
+    modem.simUnlock(simPIN);
   }
-  Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
 
-  // Init time (IST GMT+5:30)
-  // configTime(19800, 0, "time.google.com");
-  // struct tm timeinfo;
-  // while (!getLocalTime(&timeinfo)) {
-  //   Serial.println("Waiting for NTP...");
-  //   delay(500);
-  // }
-  // Serial.println("Time Synced!");
+  SerialMon.print("Connecting GPRS...");
+  if (!modem.gprsConnect(apn, gprsUser, gprsPass)) {
+    SerialMon.println(" FAIL");
+  } else {
+    SerialMon.println(" OK");
+  }
 
-  //mesh.setDebugMsgTypes( ERROR | MESH_STATUS | CONNECTION | SYNC | COMMUNICATION | GENERAL | MSG_TYPES | REMOTE ); // all types on
-  mesh.setDebugMsgTypes(ERROR | STARTUP);  // set before init() so that you can see startup messages
-
+  mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
   mesh.onReceive(&receivedCallback);
   mesh.onNewConnection(&newConnectionCallback);
@@ -73,56 +153,18 @@ void setup() {
 
 // ----------------------------- LOOP ----------------------------------
 void loop() {
-  // it will run the user scheduler as well
   mesh.update();
-  Serial.println("\nWaiting 2 seconds before next scan...\n");
-  delay(2000);
-}
 
-// Needed for painless library
-void receivedCallback(uint32_t from, String& msg) {
-  Serial.printf("->Received from %u msg=%s\n", from, msg.c_str());
-  postToServer(msg);
-}
+  if (!pendingQueue.empty()) {
+    String data = pendingQueue.front();
+    pendingQueue.erase(pendingQueue.begin());
 
-void newConnectionCallback(uint32_t nodeId) {
-  Serial.printf(":-d> New node joined the party! NodeId = %u\n", nodeId);
-}
+    String payload = "{\"scanner_id\":\"abcxut234\",\"data\":" + data + "}";
+    postToServer(payload);
+  }
 
-void changedConnectionCallback() {
-  Serial.printf("Changed connections\n");
-}
-
-void nodeTimeAdjustedCallback(int32_t offset) {
-  Serial.printf("Adjusted time %u. Offset = %d\n", mesh.getNodeTime(), offset);
-}
-
-// CUSTOM FUNCTIONS
-void postToServer(String data) {
-
-    WiFiClient client;
-    HTTPClient http;
-    http.begin(client, serverName);
-    http.addHeader("Content-Type", "application/json");
-
-    // StaticJsonDocument<200> doc;
-    // DeserializationError err = deserializeJson(doc, data);
-    // Serial.print(doc["beacon_id"]);
-    // Serial.print(doc["rssi"]);
-    // doc["beacon_id"] = d.mac;
-    // doc["rssi"] = d.rssi;
-//    doc["name"] = d.name;
-//    doc["time"] = d.timestamp;
-
-    // String json;
-    // serializeJson(doc, json);
-
-    int code = http.POST(data);
-
-    Serial.print("POST -> ");
-    Serial.print(data);
-    Serial.print(" | Response: ");
-    Serial.println(code);
-
-    http.end();
+  if (!modem.isGprsConnected()) {
+    SerialMon.println("Reconnecting GPRS...");
+    modem.gprsConnect(apn, gprsUser, gprsPass);
+  }
 }
